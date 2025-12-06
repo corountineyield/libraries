@@ -1,0 +1,210 @@
+local VIM = {}
+VIM.__index = VIM
+
+local UIS = game:GetService("UserInputService")
+local RS = game:GetService("RunService")
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+
+local Player = Players.LocalPlayer
+local Mouse = Player:GetMouse()
+
+local ActiveTouches = {}
+local IDCounter = 0
+local InputBuffer = {}
+local IsProcessing = false
+
+local function NewID()
+    IDCounter = IDCounter + 1
+    return IDCounter
+end
+
+local function MakeTouchData(Pos, State, ID)
+    return {
+        Pos = Pos,
+        Delta = Vector2.new(0, 0),
+        State = State,
+        ID = ID or NewID(),
+        Time = tick()
+    }
+end
+
+function VIM.new()
+    local self = setmetatable({}, VIM)
+    self.On = true
+    self.TouchOn = true
+    self.GyroOn = false
+    self.AccelOn = false
+    self.Touches = {}
+    self.Buttons = {}
+    self.Stick = {}
+    return self
+end
+
+function VIM:SendTouch(Type, Pos, ID, Force)
+    if not self.TouchOn then return end
+    
+    local TouchPos = Pos or Vector2.new(0, 0)
+    local TouchID = ID or NewID()
+    
+    if Type == Enum.UserInputType.Touch then
+        if not self.Touches[TouchID] then
+            self.Touches[TouchID] = MakeTouchData(TouchPos, Enum.UserInputState.Begin, TouchID)
+            ActiveTouches[TouchID] = true
+        end
+    end
+    
+    local Input = {
+        UserInputType = Type,
+        Position = Vector3.new(TouchPos.X, TouchPos.Y, 0),
+        Delta = Vector3.new(0, 0, 0),
+        KeyCode = Enum.KeyCode.Unknown,
+        UserInputState = self.Touches[TouchID] and self.Touches[TouchID].State or Enum.UserInputState.Begin
+    }
+    
+    table.insert(InputBuffer, {
+        Kind = "touch",
+        Data = Input,
+        ID = TouchID,
+        Force = Force or 1
+    })
+    
+    return TouchID
+end
+
+function VIM:StartTouch(Pos, ID)
+    local TID = ID or NewID()
+    self:SendTouch(Enum.UserInputType.Touch, Pos, TID)
+    
+    if self.Touches[TID] then
+        self.Touches[TID].State = Enum.UserInputState.Begin
+    else
+        self.Touches[TID] = MakeTouchData(Pos, Enum.UserInputState.Begin, TID)
+    end
+    
+    return TID
+end
+
+function VIM:MoveTouch(Pos, ID)
+    if not self.Touches[ID] then return end
+    
+    local OldPos = self.Touches[ID].Pos
+    local MoveDelta = Pos - OldPos
+    
+    self.Touches[ID].Pos = Pos
+    self.Touches[ID].Delta = MoveDelta
+    self.Touches[ID].State = Enum.UserInputState.Change
+    
+    local Input = {
+        UserInputType = Enum.UserInputType.Touch,
+        Position = Vector3.new(Pos.X, Pos.Y, 0),
+        Delta = Vector3.new(MoveDelta.X, MoveDelta.Y, 0),
+        KeyCode = Enum.KeyCode.Unknown,
+        UserInputState = Enum.UserInputState.Change
+    }
+    
+    table.insert(InputBuffer, {
+        Kind = "move",
+        Data = Input,
+        ID = ID
+    })
+end
+
+function VIM:StopTouch(ID)
+    if not self.Touches[ID] then return end
+    
+    local Pos = self.Touches[ID].Pos
+    self.Touches[ID].State = Enum.UserInputState.End
+    
+    local Input = {
+        UserInputType = Enum.UserInputType.Touch,
+        Position = Vector3.new(Pos.X, Pos.Y, 0),
+        Delta = Vector3.new(0, 0, 0),
+        KeyCode = Enum.KeyCode.Unknown,
+        UserInputState = Enum.UserInputState.End
+    }
+    
+    table.insert(InputBuffer, {
+        Kind = "end",
+        Data = Input,
+        ID = ID
+    })
+    
+    task.wait(0.05)
+    self.Touches[ID] = nil
+    ActiveTouches[ID] = nil
+end
+
+function VIM:Tap(Pos, Time)
+    Time = Time or 0.1
+    local TID = self:StartTouch(Pos)
+    task.wait(Time)
+    self:StopTouch(TID)
+end
+
+function VIM:Swipe(Start, End, Time)
+    Time = Time or 0.3
+    local TID = self:StartTouch(Start)
+    
+    local Frames = math.floor(Time * 60)
+    local Step = (End - Start) / Frames
+    
+    for i = 1, Frames do
+        local Curr = Start + (Step * i)
+        self:MoveTouch(Curr, TID)
+        task.wait(1/60)
+    end
+    
+    self:StopTouch(TID)
+end
+
+function VIM:Pinch(Center, Dist1, Dist2, Time)
+    Time = Time or 0.5
+    
+    local Off = Vector2.new(Dist1 / 2, 0)
+    local P1Start = Center - Off
+    local P2Start = Center + Off
+    
+    local T1 = self:StartTouch(P1Start)
+    local T2 = self:StartTouch(P2Start)
+    
+    local Frames = math.floor(Time * 60)
+    
+    for i = 1, Frames do
+        local Progress = i / Frames
+        local CurrDist = Dist1 + (Dist2 - Dist1) * Progress
+        local CurrOff = Vector2.new(CurrDist / 2, 0)
+        
+        self:MoveTouch(Center - CurrOff, T1)
+        self:MoveTouch(Center + CurrOff, T2)
+        
+        task.wait(1/60)
+    end
+    
+    self:StopTouch(T1)
+    self:StopTouch(T2)
+end
+
+function VIM:Rotate(Center, Rad, Ang1, Ang2, Time)
+    Time = Time or 0.5
+    
+    local T1 = self:StartTouch(Center + Vector2.new(Rad, 0))
+    local T2 = self:StartTouch(Center + Vector2.new(-Rad, 0))
+    
+    local Frames = math.floor(Time * 60)
+    
+    for i = 1, Frames do
+        local Progress = i / Frames
+        local Ang = Ang1 + (Ang2 - Ang1) * Progress
+        
+        local P1 = Center + Vector2.new(
+            math.cos(Ang) * Rad,
+            math.sin(Ang) * Rad
+        )
+        local P2 = Center + Vector2.new(
+            math.cos(Ang + math.pi) * Rad,
+            math.sin(Ang + math.pi) * Rad
+        )
+        
+        self:MoveTouch(P1, T1)
+        self:MoveTo
