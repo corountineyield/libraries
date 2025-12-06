@@ -4,6 +4,7 @@ VIM.__index = VIM
 local UIS = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
+local VirtualInputManager = game:GetService("VirtualInputManager")
 
 local Player = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
@@ -12,6 +13,13 @@ local TouchRegistry = {}
 local IDGen = 0
 local InputQueue = {}
 local ActiveInputs = {}
+
+local TouchState = {
+    Begin = 0,
+    End = 1,
+    Move = 2,
+    Cancel = 3
+}
 
 function VIM.New()
     local Self = setmetatable({}, VIM)
@@ -26,13 +34,65 @@ function VIM.New()
     Self.GamepadConnected = {}
     Self.Recording = false
     Self.Playing = false
+    
+    Self.ProcessConnection = RunService.Heartbeat:Connect(function()
+        Self:ProcessInputQueue()
+    end)
+    
     return Self
+end
+
+function VIM:ProcessInputQueue()
+    if #InputQueue == 0 then return end
+    
+    local Event = table.remove(InputQueue, 1)
+    
+    if Event.Type == "touch" then
+        VirtualInputManager:SendTouchEvent(Event.State, Event.Position.X, Event.Position.Y, game)
+        
+    elseif Event.Type == "key" then
+        VirtualInputManager:SendKeyEvent(Event.Pressed, Event.Key, Event.Repeated, Event.Layer)
+        
+    elseif Event.Type == "mousebutton" then
+        VirtualInputManager:SendMouseButtonEvent(Event.Position.X, Event.Position.Y, Event.Button, Event.Down, Event.Layer, Event.Repeat)
+        
+    elseif Event.Type == "mousemove" then
+        VirtualInputManager:SendMouseMoveEvent(Event.Position.X, Event.Position.Y, Event.Layer)
+        
+    elseif Event.Type == "mousedelta" then
+        
+    elseif Event.Type == "mousewheel" then
+        VirtualInputManager:SendMouseWheelEvent(Event.Position.X, Event.Position.Y, Event.Forward, Event.Layer)
+        
+    elseif Event.Type == "textinput" then
+        VirtualInputManager:SendTextInputCharacterEvent(Event.Text, Event.Layer)
+        
+    elseif Event.Type == "accel" then
+        VirtualInputManager:SendAccelerometerEvent(Event.Acceleration)
+        
+    elseif Event.Type == "gyro" then
+        VirtualInputManager:SendGyroscopeEvent(Event.Rotation)
+        
+    elseif Event.Type == "gravity" then
+        VirtualInputManager:SendGravityEvent(Event.Gravity)
+        
+    elseif Event.Type == "scroll" then
+        
+    elseif Event.Type == "gamepadaxis" then
+        
+    elseif Event.Type == "gamepadbutton" then
+        
+    elseif Event.Type == "gamepadconnect" then
+        
+    elseif Event.Type == "gamepaddisconnect" then
+        
+    end
 end
 
 function VIM:SendTouchEvent(TouchID, State, X, Y)
     if not self.TouchEnabled then return end
     
-    local TouchState = State or 0
+    local TouchStateValue = State or TouchState.Begin
     local PosX = X or 0
     local PosY = Y or 0
     local ID = TouchID or IDGen
@@ -40,19 +100,26 @@ function VIM:SendTouchEvent(TouchID, State, X, Y)
     if not self.Touches[ID] then
         self.Touches[ID] = {
             Pos = Vector2.new(PosX, PosY),
-            State = TouchState,
+            State = TouchStateValue,
             ID = ID,
             StartTime = tick(),
             Force = 1
         }
+    else
+        self.Touches[ID].Pos = Vector2.new(PosX, PosY)
+        self.Touches[ID].State = TouchStateValue
     end
     
     table.insert(InputQueue, {
         Type = "touch",
         ID = ID,
-        State = TouchState,
+        State = TouchStateValue,
         Position = Vector2.new(PosX, PosY)
     })
+    
+    if TouchStateValue == TouchState.End or TouchStateValue == TouchState.Cancel then
+        self.Touches[ID] = nil
+    end
     
     IDGen = IDGen + 1
     return ID
@@ -294,13 +361,11 @@ function VIM:Tap(Pos, Duration)
     local Time = Duration or 0.1
     local TouchPos = Pos or Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
     
-    local ID = self:SendTouchEvent(nil, 0, TouchPos.X, TouchPos.Y)
+    local ID = self:SendTouchEvent(nil, TouchState.Begin, TouchPos.X, TouchPos.Y)
     task.wait(Time)
-    self:SendTouchEvent(ID, 1, TouchPos.X, TouchPos.Y)
+    self:SendTouchEvent(ID, TouchState.Move, TouchPos.X, TouchPos.Y)
     task.wait(0.05)
-    self:SendTouchEvent(ID, 3, TouchPos.X, TouchPos.Y)
-    
-    self.Touches[ID] = nil
+    self:SendTouchEvent(ID, TouchState.End, TouchPos.X, TouchPos.Y)
 end
 
 function VIM:DoubleTap(Pos, Delay)
@@ -314,13 +379,11 @@ function VIM:LongPress(Pos, Duration)
     local Time = Duration or 1.0
     local TouchPos = Pos or Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
     
-    local ID = self:SendTouchEvent(nil, 0, TouchPos.X, TouchPos.Y)
+    local ID = self:SendTouchEvent(nil, TouchState.Begin, TouchPos.X, TouchPos.Y)
     task.wait(Time)
-    self:SendTouchEvent(ID, 1, TouchPos.X, TouchPos.Y)
+    self:SendTouchEvent(ID, TouchState.Move, TouchPos.X, TouchPos.Y)
     task.wait(0.05)
-    self:SendTouchEvent(ID, 3, TouchPos.X, TouchPos.Y)
-    
-    self.Touches[ID] = nil
+    self:SendTouchEvent(ID, TouchState.End, TouchPos.X, TouchPos.Y)
 end
 
 function VIM:Swipe(Start, End, Duration)
@@ -328,22 +391,18 @@ function VIM:Swipe(Start, End, Duration)
     local StartPos = Start or Vector2.new(100, Camera.ViewportSize.Y / 2)
     local EndPos = End or Vector2.new(Camera.ViewportSize.X - 100, Camera.ViewportSize.Y / 2)
     
-    local ID = self:SendTouchEvent(nil, 0, StartPos.X, StartPos.Y)
+    local ID = self:SendTouchEvent(nil, TouchState.Begin, StartPos.X, StartPos.Y)
     
     local Steps = math.floor(Time * 60)
     local Delta = (EndPos - StartPos) / Steps
     
     for i = 1, Steps do
         local Current = StartPos + (Delta * i)
-        self:SendTouchEvent(ID, 2, Current.X, Current.Y)
+        self:SendTouchEvent(ID, TouchState.Move, Current.X, Current.Y)
         task.wait(1/60)
     end
     
-    self:SendTouchEvent(ID, 1, EndPos.X, EndPos.Y)
-    task.wait(0.05)
-    self:SendTouchEvent(ID, 3, EndPos.X, EndPos.Y)
-    
-    self.Touches[ID] = nil
+    self:SendTouchEvent(ID, TouchState.End, EndPos.X, EndPos.Y)
 end
 
 function VIM:Drag(Start, End, Duration)
@@ -360,8 +419,8 @@ function VIM:Pinch(Center, StartDist, EndDist, Duration)
     local P1Start = CenterPos - Offset
     local P2Start = CenterPos + Offset
     
-    local ID1 = self:SendTouchEvent(nil, 0, P1Start.X, P1Start.Y)
-    local ID2 = self:SendTouchEvent(nil, 0, P2Start.X, P2Start.Y)
+    local ID1 = self:SendTouchEvent(nil, TouchState.Begin, P1Start.X, P1Start.Y)
+    local ID2 = self:SendTouchEvent(nil, TouchState.Begin, P2Start.X, P2Start.Y)
     
     local Steps = math.floor(Time * 60)
     
@@ -373,21 +432,15 @@ function VIM:Pinch(Center, StartDist, EndDist, Duration)
         local P1 = CenterPos - CurrentOffset
         local P2 = CenterPos + CurrentOffset
         
-        self:SendTouchEvent(ID1, 2, P1.X, P1.Y)
-        self:SendTouchEvent(ID2, 2, P2.X, P2.Y)
+        self:SendTouchEvent(ID1, TouchState.Move, P1.X, P1.Y)
+        self:SendTouchEvent(ID2, TouchState.Move, P2.X, P2.Y)
         
         task.wait(1/60)
     end
     
     local FinalOffset = Vector2.new(Dist2 / 2, 0)
-    self:SendTouchEvent(ID1, 1, (CenterPos - FinalOffset).X, (CenterPos - FinalOffset).Y)
-    self:SendTouchEvent(ID2, 1, (CenterPos + FinalOffset).X, (CenterPos + FinalOffset).Y)
-    task.wait(0.05)
-    self:SendTouchEvent(ID1, 3, (CenterPos - FinalOffset).X, (CenterPos - FinalOffset).Y)
-    self:SendTouchEvent(ID2, 3, (CenterPos + FinalOffset).X, (CenterPos + FinalOffset).Y)
-    
-    self.Touches[ID1] = nil
-    self.Touches[ID2] = nil
+    self:SendTouchEvent(ID1, TouchState.End, (CenterPos - FinalOffset).X, (CenterPos - FinalOffset).Y)
+    self:SendTouchEvent(ID2, TouchState.End, (CenterPos + FinalOffset).X, (CenterPos + FinalOffset).Y)
 end
 
 function VIM:Zoom(Center, StartDist, EndDist, Duration)
@@ -404,8 +457,8 @@ function VIM:Rotate(Center, Radius, StartAngle, EndAngle, Duration)
     local P1Start = CenterPos + Vector2.new(math.cos(Angle1) * Rad, math.sin(Angle1) * Rad)
     local P2Start = CenterPos + Vector2.new(math.cos(Angle1 + math.pi) * Rad, math.sin(Angle1 + math.pi) * Rad)
     
-    local ID1 = self:SendTouchEvent(nil, 0, P1Start.X, P1Start.Y)
-    local ID2 = self:SendTouchEvent(nil, 0, P2Start.X, P2Start.Y)
+    local ID1 = self:SendTouchEvent(nil, TouchState.Begin, P1Start.X, P1Start.Y)
+    local ID2 = self:SendTouchEvent(nil, TouchState.Begin, P2Start.X, P2Start.Y)
     
     local Steps = math.floor(Time * 60)
     
@@ -416,8 +469,8 @@ function VIM:Rotate(Center, Radius, StartAngle, EndAngle, Duration)
         local P1 = CenterPos + Vector2.new(math.cos(CurrentAngle) * Rad, math.sin(CurrentAngle) * Rad)
         local P2 = CenterPos + Vector2.new(math.cos(CurrentAngle + math.pi) * Rad, math.sin(CurrentAngle + math.pi) * Rad)
         
-        self:SendTouchEvent(ID1, 2, P1.X, P1.Y)
-        self:SendTouchEvent(ID2, 2, P2.X, P2.Y)
+        self:SendTouchEvent(ID1, TouchState.Move, P1.X, P1.Y)
+        self:SendTouchEvent(ID2, TouchState.Move, P2.X, P2.Y)
         
         task.wait(1/60)
     end
@@ -425,14 +478,8 @@ function VIM:Rotate(Center, Radius, StartAngle, EndAngle, Duration)
     local FinalP1 = CenterPos + Vector2.new(math.cos(Angle2) * Rad, math.sin(Angle2) * Rad)
     local FinalP2 = CenterPos + Vector2.new(math.cos(Angle2 + math.pi) * Rad, math.sin(Angle2 + math.pi) * Rad)
     
-    self:SendTouchEvent(ID1, 1, FinalP1.X, FinalP1.Y)
-    self:SendTouchEvent(ID2, 1, FinalP2.X, FinalP2.Y)
-    task.wait(0.05)
-    self:SendTouchEvent(ID1, 3, FinalP1.X, FinalP1.Y)
-    self:SendTouchEvent(ID2, 3, FinalP2.X, FinalP2.Y)
-    
-    self.Touches[ID1] = nil
-    self.Touches[ID2] = nil
+    self:SendTouchEvent(ID1, TouchState.End, FinalP1.X, FinalP1.Y)
+    self:SendTouchEvent(ID2, TouchState.End, FinalP2.X, FinalP2.Y)
 end
 
 function VIM:MultiTouch(Positions, Duration)
@@ -440,17 +487,16 @@ function VIM:MultiTouch(Positions, Duration)
     local IDs = {}
     
     for i, Pos in ipairs(Positions) do
-        IDs[i] = self:SendTouchEvent(nil, 0, Pos.X, Pos.Y)
+        IDs[i] = self:SendTouchEvent(nil, TouchState.Begin, Pos.X, Pos.Y)
     end
     
     task.wait(Time)
     
     for i, ID in ipairs(IDs) do
         local Pos = Positions[i]
-        self:SendTouchEvent(ID, 1, Pos.X, Pos.Y)
+        self:SendTouchEvent(ID, TouchState.Move, Pos.X, Pos.Y)
         task.wait(0.05)
-        self:SendTouchEvent(ID, 3, Pos.X, Pos.Y)
-        self.Touches[ID] = nil
+        self:SendTouchEvent(ID, TouchState.End, Pos.X, Pos.Y)
     end
 end
 
@@ -461,7 +507,7 @@ function VIM:Circle(Center, Radius, Clockwise, Duration)
     local Direction = Clockwise and 1 or -1
     
     local StartPos = CenterPos + Vector2.new(Rad, 0)
-    local ID = self:SendTouchEvent(nil, 0, StartPos.X, StartPos.Y)
+    local ID = self:SendTouchEvent(nil, TouchState.Begin, StartPos.X, StartPos.Y)
     
     local Steps = math.floor(Time * 60)
     local AngleDelta = Direction * (math.pi * 2) / Steps
@@ -469,15 +515,11 @@ function VIM:Circle(Center, Radius, Clockwise, Duration)
     for i = 1, Steps do
         local Angle = AngleDelta * i
         local Pos = CenterPos + Vector2.new(math.cos(Angle) * Rad, math.sin(Angle) * Rad)
-        self:SendTouchEvent(ID, 2, Pos.X, Pos.Y)
+        self:SendTouchEvent(ID, TouchState.Move, Pos.X, Pos.Y)
         task.wait(1/60)
     end
     
-    self:SendTouchEvent(ID, 1, StartPos.X, StartPos.Y)
-    task.wait(0.05)
-    self:SendTouchEvent(ID, 3, StartPos.X, StartPos.Y)
-    
-    self.Touches[ID] = nil
+    self:SendTouchEvent(ID, TouchState.End, StartPos.X, StartPos.Y)
 end
 
 function VIM:PressKey(Key, Duration)
@@ -590,12 +632,12 @@ function VIM:Shake(Intensity, Duration)
     local Steps = math.floor(Time * 60)
     
     for i = 1, Steps do
-        local Shake = Vector3.new(
+        local ShakeVector = Vector3.new(
             (math.random() - 0.5) * Power * 2,
             (math.random() - 0.5) * Power * 2,
             (math.random() - 0.5) * Power * 2
         )
-        self:SendAccelerometerEvent(Shake)
+        self:SendAccelerometerEvent(ShakeVector)
         task.wait(1/60)
     end
     
@@ -714,6 +756,13 @@ end
 
 function VIM:Disable()
     self.Enabled = false
+end
+
+function VIM:Destroy()
+    if self.ProcessConnection then
+        self.ProcessConnection:Disconnect()
+    end
+    self:ClearInputs()
 end
 
 return VIM
