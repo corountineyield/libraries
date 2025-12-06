@@ -4,19 +4,15 @@ VIM.__index = VIM
 local UIS = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
+local RealVIM = game:GetService("VirtualInputManager")
 
 local Player = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
-
--- REPLACING VirtualInputManager because it's broken on mobile
--- clicks work but then you can't move for 10 seconds
--- we hook VIM and handle inputs ourselves
 
 local TouchRegistry = {}
 local IDGen = 0
 local InputQueue = {}
 local ActiveInputs = {}
-local InputConnections = {}
 
 -- touch states: 0=start, 1=end, 2=move, 3=cancel
 local TouchState = {
@@ -25,64 +21,6 @@ local TouchState = {
     Move = 2,
     Cancel = 3
 }
-
--- hook into the actual input events
-local function FireTouchInput(state, x, y, id)
-    local touchPos = Vector2.new(x, y)
-    local inputObject = {
-        UserInputType = Enum.UserInputType.Touch,
-        UserInputState = state == 0 and Enum.UserInputState.Begin or 
-                        state == 1 and Enum.UserInputState.End or
-                        state == 2 and Enum.UserInputState.Change or
-                        Enum.UserInputState.Cancel,
-        Position = Vector3.new(x, y, 0),
-        Delta = Vector3.new(0, 0, 0),
-        KeyCode = Enum.KeyCode.Unknown
-    }
-    
-    -- fire to actual input handlers
-    for _, conn in pairs(InputConnections) do
-        if conn.Callback then
-            conn.Callback(inputObject)
-        end
-    end
-end
-
-local function FireKeyInput(pressed, keycode)
-    local inputObject = {
-        UserInputType = Enum.UserInputType.Keyboard,
-        UserInputState = pressed and Enum.UserInputState.Begin or Enum.UserInputState.End,
-        Position = Vector3.new(0, 0, 0),
-        Delta = Vector3.new(0, 0, 0),
-        KeyCode = keycode
-    }
-    
-    for _, conn in pairs(InputConnections) do
-        if conn.Callback then
-            conn.Callback(inputObject)
-        end
-    end
-end
-
-local function FireMouseInput(eventType, x, y, button, down)
-    local inputType = Enum.UserInputType.MouseButton1
-    if button == 1 then inputType = Enum.UserInputType.MouseButton2
-    elseif button == 2 then inputType = Enum.UserInputType.MouseButton3 end
-    
-    local inputObject = {
-        UserInputType = inputType,
-        UserInputState = down and Enum.UserInputState.Begin or Enum.UserInputState.End,
-        Position = Vector3.new(x, y, 0),
-        Delta = Vector3.new(0, 0, 0),
-        KeyCode = Enum.KeyCode.Unknown
-    }
-    
-    for _, conn in pairs(InputConnections) do
-        if conn.Callback then
-            conn.Callback(inputObject)
-        end
-    end
-end
 
 function VIM.New()
     local Self = setmetatable({}, VIM)
@@ -98,12 +36,6 @@ function VIM.New()
     Self.Recording = false
     Self.Playing = false
     
-    -- hook into UIS input events
-    table.insert(InputConnections, {
-        Connection = UIS.InputBegan:Connect(function() end),
-        Callback = nil
-    })
-    
     -- process queue every frame
     Self.ProcessConnection = RunService.Heartbeat:Connect(function()
         Self:ProcessInputQueue()
@@ -112,50 +44,68 @@ function VIM.New()
     return Self
 end
 
--- processes queued inputs and fires them directly
+-- processes queued inputs and fires them through VIM with delays
 function VIM:ProcessInputQueue()
     if #InputQueue == 0 then return end
     
     local Event = table.remove(InputQueue, 1)
     
+    -- small delay between inputs to prevent freeze
+    task.wait(0.016)
+    
     if Event.Type == "touch" then
-        FireTouchInput(Event.State, Event.Position.X, Event.Position.Y, Event.ID)
+        -- SendTouchEvent(touchId, state, x, y) - NO game parameter!
+        RealVIM:SendTouchEvent(Event.ID, Event.State, Event.Position.X, Event.Position.Y)
         
     elseif Event.Type == "key" then
-        FireKeyInput(Event.Pressed, Event.Key)
+        RealVIM:SendKeyEvent(Event.Pressed, Event.Key, Event.Repeated, Event.Layer)
         
     elseif Event.Type == "mousebutton" then
-        FireMouseInput("button", Event.Position.X, Event.Position.Y, Event.Button, Event.Down)
+        RealVIM:SendMouseButtonEvent(Event.Position.X, Event.Position.Y, Event.Button, Event.Down, Event.Layer, Event.Repeat)
         
     elseif Event.Type == "mousemove" then
-        -- update mouse position directly
+        RealVIM:SendMouseMoveEvent(Event.Position.X, Event.Position.Y, Event.Layer)
         
     elseif Event.Type == "mousedelta" then
-        -- TODO: figure out delta handling
+        RealVIM:SendMouseMoveDeltaEvent(Event.Delta.X, Event.Delta.Y, Event.Layer)
         
     elseif Event.Type == "mousewheel" then
-        -- scroll events
+        RealVIM:SendMouseWheelEvent(Event.Position.X, Event.Position.Y, Event.Forward, Event.Layer)
         
     elseif Event.Type == "textinput" then
-        -- text input handling
+        RealVIM:SendTextInputCharacterEvent(Event.Text, Event.Layer)
         
     elseif Event.Type == "accel" then
-        -- accelerometer
+        -- takes x, y, z separately NOT Vector3!
+        RealVIM:SendAccelerometerEvent(Event.Acceleration.X, Event.Acceleration.Y, Event.Acceleration.Z)
         
     elseif Event.Type == "gyro" then
-        -- gyroscope
+        -- takes quaternion (quatX, quatY, quatZ, quatW) NOT Vector3!
+        -- we'll convert our Vector3 to quaternion... or just pass raw
+        local rot = Event.Rotation
+        RealVIM:SendGyroscopeEvent(rot.X, rot.Y, rot.Z, 0)
         
     elseif Event.Type == "gravity" then
-        -- gravity
+        -- takes x, y, z separately NOT Vector3!
+        RealVIM:SendGravityEvent(Event.Gravity.X, Event.Gravity.Y, Event.Gravity.Z)
         
     elseif Event.Type == "scroll" then
-        -- idk if this works, never tested it
+        RealVIM:SendScroll(Event.Position.X, Event.Position.Y, Event.Delta.X, Event.Delta.Y, Event.Options, Event.Layer)
         
     elseif Event.Type == "gamepadaxis" then
-        -- TODO
+        -- HandleGamepadAxisInput(objectId, keyCode, x, y, z)
+        RealVIM:HandleGamepadAxisInput(Event.Gamepad, Event.Axis, Event.Value, 0, 0)
         
     elseif Event.Type == "gamepadbutton" then
-        -- TODO
+        -- HandleGamepadButtonInput(deviceId, keyCode, buttonState)
+        local buttonState = Event.Pressed and 1 or 0
+        RealVIM:HandleGamepadButtonInput(Event.Gamepad, Event.Button, buttonState)
+        
+    elseif Event.Type == "gamepadconnect" then
+        RealVIM:HandleGamepadConnect(Event.Gamepad)
+        
+    elseif Event.Type == "gamepaddisconnect" then
+        RealVIM:HandleGamepadDisconnect(Event.Gamepad)
     end
 end
 
@@ -187,7 +137,6 @@ function VIM:SendTouchEvent(TouchID, State, X, Y)
         Position = Vector2.new(PosX, PosY)
     })
     
-    -- cleanup dead touches
     if TouchStateValue == TouchState.End or TouchStateValue == TouchState.Cancel then
         self.Touches[ID] = nil
     end
@@ -202,6 +151,7 @@ function VIM:SendKeyEvent(IsPressed, KeyCode, IsRepeated, LayerCollector)
     local Pressed = IsPressed or false
     local Key = KeyCode or Enum.KeyCode.Unknown
     local Repeated = IsRepeated or false
+    local Layer = LayerCollector or game
     
     self.Keys[Key] = Pressed
     
@@ -209,7 +159,8 @@ function VIM:SendKeyEvent(IsPressed, KeyCode, IsRepeated, LayerCollector)
         Type = "key",
         Key = Key,
         Pressed = Pressed,
-        Repeated = Repeated
+        Repeated = Repeated,
+        Layer = Layer
     })
 end
 
@@ -220,12 +171,16 @@ function VIM:SendMouseButtonEvent(X, Y, MouseButton, IsDown, LayerCollector, Rep
     local PosY = Y or 0
     local Button = MouseButton or 0
     local Down = IsDown or false
+    local Layer = LayerCollector or game
+    local Count = RepeatCount or 0
     
     table.insert(InputQueue, {
         Type = "mousebutton",
         Position = Vector2.new(PosX, PosY),
         Button = Button,
-        Down = Down
+        Down = Down,
+        Layer = Layer,
+        Repeat = Count
     })
 end
 
@@ -234,10 +189,26 @@ function VIM:SendMouseMoveEvent(X, Y, LayerCollector)
     
     local PosX = X or 0
     local PosY = Y or 0
+    local Layer = LayerCollector or game
     
     table.insert(InputQueue, {
         Type = "mousemove",
-        Position = Vector2.new(PosX, PosY)
+        Position = Vector2.new(PosX, PosY),
+        Layer = Layer
+    })
+end
+
+function VIM:SendMouseMoveDeltaEvent(DeltaX, DeltaY, LayerCollector)
+    if not self.Enabled then return end
+    
+    local DX = DeltaX or 0
+    local DY = DeltaY or 0
+    local Layer = LayerCollector or game
+    
+    table.insert(InputQueue, {
+        Type = "mousedelta",
+        Delta = Vector2.new(DX, DY),
+        Layer = Layer
     })
 end
 
@@ -247,11 +218,13 @@ function VIM:SendMouseWheelEvent(X, Y, IsForwardScroll, LayerCollector)
     local PosX = X or 0
     local PosY = Y or 0
     local Forward = IsForwardScroll or false
+    local Layer = LayerCollector or game
     
     table.insert(InputQueue, {
         Type = "mousewheel",
         Position = Vector2.new(PosX, PosY),
-        Forward = Forward
+        Forward = Forward,
+        Layer = Layer
     })
 end
 
@@ -259,11 +232,150 @@ function VIM:SendTextInputCharacterEvent(Str, LayerCollector)
     if not self.Enabled then return end
     
     local Text = Str or ""
+    local Layer = LayerCollector or game
     
     table.insert(InputQueue, {
         Type = "textinput",
-        Text = Text
+        Text = Text,
+        Layer = Layer
     })
+end
+
+function VIM:SendAccelerometerEvent(Accel)
+    if not self.AccelEnabled then return end
+    
+    local Acceleration = Accel or Vector3.new(0, 0, 0)
+    
+    table.insert(InputQueue, {
+        Type = "accel",
+        Acceleration = Acceleration
+    })
+end
+
+function VIM:SendGyroscopeEvent(Rotation)
+    if not self.GyroEnabled then return end
+    
+    local Rot = Rotation or Vector3.new(0, 0, 0)
+    
+    table.insert(InputQueue, {
+        Type = "gyro",
+        Rotation = Rot
+    })
+end
+
+function VIM:SendGravityEvent(Gravity)
+    if not self.GravityEnabled then return end
+    
+    local Grav = Gravity or Vector3.new(0, -9.81, 0)
+    
+    table.insert(InputQueue, {
+        Type = "gravity",
+        Gravity = Grav
+    })
+end
+
+function VIM:SendScroll(X, Y, DeltaX, DeltaY, Options, LayerCollector)
+    if not self.Enabled then return end
+    
+    local PosX = X or 0
+    local PosY = Y or 0
+    local DX = DeltaX or 0
+    local DY = DeltaY or 0
+    local Opts = Options or {}
+    local Layer = LayerCollector or game
+    
+    table.insert(InputQueue, {
+        Type = "scroll",
+        Position = Vector2.new(PosX, PosY),
+        Delta = Vector2.new(DX, DY),
+        Options = Opts,
+        Layer = Layer
+    })
+end
+
+function VIM:HandleGamepadAxisInput(Gamepad, Axis, Value)
+    if not self.Enabled then return end
+    
+    local Pad = Gamepad or Enum.UserInputType.Gamepad1
+    local Ax = Axis or Enum.KeyCode.Thumbstick1
+    local Val = Value or 0
+    
+    table.insert(InputQueue, {
+        Type = "gamepadaxis",
+        Gamepad = Pad,
+        Axis = Ax,
+        Value = Val
+    })
+end
+
+function VIM:HandleGamepadButtonInput(Gamepad, Button, IsPressed)
+    if not self.Enabled then return end
+    
+    local Pad = Gamepad or Enum.UserInputType.Gamepad1
+    local Btn = Button or Enum.KeyCode.ButtonA
+    local Pressed = IsPressed or false
+    
+    table.insert(InputQueue, {
+        Type = "gamepadbutton",
+        Gamepad = Pad,
+        Button = Btn,
+        Pressed = Pressed
+    })
+end
+
+function VIM:HandleGamepadConnect(Gamepad)
+    if not self.Enabled then return end
+    
+    local Pad = Gamepad or Enum.UserInputType.Gamepad1
+    self.GamepadConnected[Pad] = true
+    
+    table.insert(InputQueue, {
+        Type = "gamepadconnect",
+        Gamepad = Pad
+    })
+end
+
+function VIM:HandleGamepadDisconnect(Gamepad)
+    if not self.Enabled then return end
+    
+    local Pad = Gamepad or Enum.UserInputType.Gamepad1
+    self.GamepadConnected[Pad] = false
+    
+    table.insert(InputQueue, {
+        Type = "gamepaddisconnect",
+        Gamepad = Pad
+    })
+end
+
+-- recording stuff - works but never actually used it
+function VIM:StartRecording()
+    self.Recording = true
+    self.RecordedInputs = {}
+    self.RecordStartTime = tick()
+end
+
+function VIM:StopRecording()
+    self.Recording = false
+    return self.RecordedInputs
+end
+
+function VIM:StartPlaying(InputData)
+    self.Playing = true
+    self.PlaybackData = InputData or {}
+    self.PlaybackIndex = 1
+    self.PlaybackStartTime = tick()
+end
+
+function VIM:StopPlaying()
+    self.Playing = false
+    self.PlaybackData = nil
+    self.PlaybackIndex = 1
+end
+
+function VIM:WaitForInputEventsProcessed()
+    while #InputQueue > 0 do
+        task.wait()
+    end
 end
 
 -- gesture functions below
@@ -521,6 +633,86 @@ function VIM:DragMouse(Start, End, Duration)
     self:SendMouseButtonEvent(EndPos.X, EndPos.Y, 0, false)
 end
 
+-- device motion stuff
+
+function VIM:Tilt(Pitch, Roll, Yaw, Duration)
+    if not self.GyroEnabled then return end
+    
+    local Time = Duration or 0.5
+    local Target = Vector3.new(Pitch or 0, Roll or 0, Yaw or 0)
+    local Current = Vector3.new(0, 0, 0)
+    
+    local Steps = math.floor(Time * 60)
+    
+    for i = 1, Steps do
+        local Progress = i / Steps
+        Current = Current:Lerp(Target, Progress)
+        self:SendGyroscopeEvent(Current)
+        task.wait(1/60)
+    end
+end
+
+function VIM:Shake(Intensity, Duration)
+    if not self.AccelEnabled then return end
+    
+    local Time = Duration or 0.5
+    local Power = Intensity or 1
+    
+    local Steps = math.floor(Time * 60)
+    
+    for i = 1, Steps do
+        local ShakeVector = Vector3.new(
+            (math.random() - 0.5) * Power * 2,
+            (math.random() - 0.5) * Power * 2,
+            (math.random() - 0.5) * Power * 2
+        )
+        self:SendAccelerometerEvent(ShakeVector)
+        task.wait(1/60)
+    end
+    
+    self:SendAccelerometerEvent(Vector3.new(0, 0, 0))
+end
+
+function VIM:SetGravity(Direction, Strength)
+    if not self.GravityEnabled then return end
+    
+    local Dir = Direction or Vector3.new(0, -1, 0)
+    local Str = Strength or 9.81
+    
+    local Gravity = Dir.Unit * Str
+    self:SendGravityEvent(Gravity)
+end
+
+-- gamepad stuff (barely tested)
+
+function VIM:PressButton(Gamepad, Button, Duration)
+    local Time = Duration or 0.1
+    local Pad = Gamepad or Enum.UserInputType.Gamepad1
+    local Btn = Button or Enum.KeyCode.ButtonA
+    
+    self:HandleGamepadButtonInput(Pad, Btn, true)
+    task.wait(Time)
+    self:HandleGamepadButtonInput(Pad, Btn, false)
+end
+
+function VIM:MoveStick(Gamepad, Stick, Position)
+    local Pad = Gamepad or Enum.UserInputType.Gamepad1
+    local Axis = Stick or Enum.KeyCode.Thumbstick1
+    local Pos = Position or Vector2.new(0, 0)
+    
+    self:HandleGamepadAxisInput(Pad, Axis, Pos.X)
+end
+
+function VIM:ConnectGamepad(Gamepad)
+    local Pad = Gamepad or Enum.UserInputType.Gamepad1
+    self:HandleGamepadConnect(Pad)
+end
+
+function VIM:DisconnectGamepad(Gamepad)
+    local Pad = Gamepad or Enum.UserInputType.Gamepad1
+    self:HandleGamepadDisconnect(Pad)
+end
+
 -- utility functions
 
 function VIM:ClearInputs()
@@ -568,11 +760,6 @@ function VIM:Disable() self.Enabled = false end
 function VIM:Destroy()
     if self.ProcessConnection then
         self.ProcessConnection:Disconnect()
-    end
-    for _, conn in pairs(InputConnections) do
-        if conn.Connection then
-            conn.Connection:Disconnect()
-        end
     end
     self:ClearInputs()
 end
