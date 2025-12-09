@@ -1,0 +1,253 @@
+local RunService = game:GetService("RunService")
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local LocalPlayer = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
+local Container = Instance.new("Folder", gethui and gethui() or game:GetService("CoreGui"))
+
+local UpdateRate = 0.05
+
+local function IsBodyPart(Name)
+	return Name == "Head" or Name:find("Torso") or Name:find("Leg") or Name:find("Arm")
+end
+
+local function GetBoundingBox(Parts)
+	local Min, Max
+	for I = 1, #Parts do
+		local Part = Parts[I]
+		local Cf, Sz = Part.CFrame, Part.Size
+		Min = Vector3.new(math.min(Min and Min.X or Cf.Position.X, (Cf - Sz * 0.5).Position.X), math.min(Min and Min.Y or Cf.Position.Y, (Cf - Sz * 0.5).Position.Y), math.min(Min and Min.Z or Cf.Position.Z, (Cf - Sz * 0.5).Position.Z))
+		Max = Vector3.new(math.max(Max and Max.X or Cf.Position.X, (Cf + Sz * 0.5).Position.X), math.max(Max and Max.Y or Cf.Position.Y, (Cf + Sz * 0.5).Position.Y), math.max(Max and Max.Z or Cf.Position.Z, (Cf + Sz * 0.5).Position.Z))
+	end
+	local Center = (Min + Max) * 0.5
+	return CFrame.new(Center, Vector3.new(Center.X, Center.Y, Max.Z)), Max - Min
+end
+
+local function WorldToScreen(World)
+	local Screen, InBounds = Camera:WorldToViewportPoint(World)
+	return Vector2.new(Screen.X, Screen.Y), InBounds, Screen.Z
+end
+
+local function CalculateCorners(Cf, Sz)
+	local Vertices = {Vector3.new(-1,-1,-1),Vector3.new(-1,1,-1),Vector3.new(-1,1,1),Vector3.new(-1,-1,1),Vector3.new(1,-1,-1),Vector3.new(1,1,-1),Vector3.new(1,1,1),Vector3.new(1,-1,1)}
+	local Corners = {}
+	for I = 1, 8 do
+		Corners[I] = WorldToScreen((Cf + Sz * 0.5 * Vertices[I]).Position)
+	end
+	local MinX, MinY, MaxX, MaxY = math.huge, math.huge, -math.huge, -math.huge
+	for I = 1, 8 do
+		MinX = math.min(MinX, Corners[I].X)
+		MinY = math.min(MinY, Corners[I].Y)
+		MaxX = math.max(MaxX, Corners[I].X)
+		MaxY = math.max(MaxY, Corners[I].Y)
+	end
+	return {Corners = Corners, TopLeft = Vector2.new(MinX, MinY), TopRight = Vector2.new(MaxX, MinY), BottomLeft = Vector2.new(MinX, MaxY), BottomRight = Vector2.new(MaxX, MaxY)}
+end
+
+local function ParseColor(Self, Color, IsOutline)
+	if Color == "Team Color" or (Self.Interface.SharedSettings.UseTeamColor and not IsOutline) then
+		return Self.Interface.GetTeamColor(Self.Player) or Color3.new(1, 1, 1)
+	end
+	return Color
+end
+
+local EspObject = {}
+EspObject.__index = EspObject
+
+function EspObject.new(Player, Interface)
+	local Self = setmetatable({}, EspObject)
+	Self.Player = Player
+	Self.Interface = Interface
+	Self:Construct()
+	return Self
+end
+
+function EspObject:Construct()
+	self.CharCache = {}
+	self.ChildCount = 0
+	self.Bin = {}
+	self.LastUpdateTime = 0
+	self.Drawings = {Visible = {HealthBarOutline = Drawing.new("Line"), HealthBar = Drawing.new("Line"), Name = Drawing.new("Text")}}
+	for _, V in pairs(self.Drawings.Visible) do
+		if V.Center then V.Center = true end
+		V.Visible = false
+		V.Thickness = V.Thickness or 1
+		self.Bin[#self.Bin + 1] = V
+	end
+	self.Drawings.Visible.Name.Text = self.Player.DisplayName
+	self.RenderConnection = RunService.Heartbeat:Connect(function(Dt) self:Render(Dt) end)
+end
+
+function EspObject:Destruct()
+	self.RenderConnection:Disconnect()
+	for I = 1, #self.Bin do self.Bin[I]:Remove() end
+	table.clear(self)
+end
+
+function EspObject:Update()
+	local Interface = self.Interface
+	self.Options = Interface.TeamSettings[Interface.IsFriendly(self.Player) and "Friendly" or "Enemy"]
+	self.Character = Interface.GetCharacter(self.Player)
+	self.Health, self.MaxHealth = Interface.GetHealth(self.Player)
+	self.Enabled = self.Options.Enabled and self.Character and not (#Interface.Whitelist > 0 and not table.find(Interface.Whitelist, self.Player.UserId))
+	local Head = self.Enabled and self.Character:FindFirstChild("Head")
+	if not Head then
+		self.CharCache = {}
+		self.OnScreen = false
+		return
+	end
+	local _, OnScreen, Depth = WorldToScreen(Head.Position)
+	self.OnScreen = OnScreen
+	self.Distance = Depth
+	if Interface.SharedSettings.LimitDistance and Depth > Interface.SharedSettings.MaxDistance then self.OnScreen = false end
+	if self.OnScreen then
+		local Children = self.Character:GetChildren()
+		if not self.CharCache[1] or self.ChildCount ~= #Children then
+			table.clear(self.CharCache)
+			for I = 1, #Children do
+				local Part = Children[I]
+				if Part:IsA("BasePart") and IsBodyPart(Part.Name) then
+					self.CharCache[#self.CharCache + 1] = Part
+				end
+			end
+			self.ChildCount = #Children
+		end
+		self.Corners = CalculateCorners(GetBoundingBox(self.CharCache))
+	end
+end
+
+function EspObject:Render(Dt)
+	local CurrentTime = tick()
+	if CurrentTime - self.LastUpdateTime >= UpdateRate then
+		self:Update()
+		self.LastUpdateTime = CurrentTime
+	end
+	local OnScreen = self.OnScreen or false
+	local Enabled = self.Enabled or false
+	local V = self.Drawings.Visible
+	local Interface = self.Interface
+	local Options = self.Options
+	local Corners = self.Corners
+	
+	V.HealthBar.Visible = Enabled and OnScreen and Options.HealthBar
+	V.HealthBarOutline.Visible = V.HealthBar.Visible and Options.HealthBarOutline
+	if V.HealthBar.Visible then
+		local BarFrom = Corners.TopLeft - Vector2.new(5, 0)
+		local BarTo = Corners.BottomLeft - Vector2.new(5, 0)
+		V.HealthBar.To = BarTo
+		V.HealthBar.From = BarTo:Lerp(BarFrom, self.Health / self.MaxHealth)
+		V.HealthBar.Color = Options.DyingColor:Lerp(Options.HealthyColor, self.Health / self.MaxHealth)
+		V.HealthBarOutline.Thickness = 3
+		V.HealthBarOutline.To = BarTo + Vector2.new(0, 1)
+		V.HealthBarOutline.From = BarFrom - Vector2.new(0, 1)
+		V.HealthBarOutline.Color = ParseColor(self, Options.HealthBarOutlineColor[1], true)
+		V.HealthBarOutline.Transparency = Options.HealthBarOutlineColor[2]
+	end
+	
+	V.Name.Visible = Enabled and OnScreen and Options.Name
+	if V.Name.Visible then
+		V.Name.Size = Interface.SharedSettings.TextSize
+		V.Name.Font = Interface.SharedSettings.TextFont
+		V.Name.Color = ParseColor(self, Options.NameColor[1])
+		V.Name.Transparency = Options.NameColor[2]
+		V.Name.Outline = Options.NameOutline
+		V.Name.OutlineColor = ParseColor(self, Options.NameOutlineColor, true)
+		V.Name.Position = (Corners.TopLeft + Corners.TopRight) * 0.5 - Vector2.new(0, V.Name.TextBounds.Y + 2)
+	end
+end
+
+local ChamObject = {}
+ChamObject.__index = ChamObject
+
+function ChamObject.new(Player, Interface)
+	local Self = setmetatable({}, ChamObject)
+	Self.Player = Player
+	Self.Interface = Interface
+	for _, HL in pairs(Workspace:GetChildren()) do if HL:IsA("Highlight") then HL:Destroy() end end
+	Self:Construct()
+	return Self
+end
+
+function ChamObject:Construct()
+	self.Highlight = Instance.new("Highlight", Container)
+	self.LastUpdateTime = 0
+	self.UpdateConnection = RunService.Heartbeat:Connect(function(Dt) self:Update(Dt) end)
+end
+
+function ChamObject:Destruct()
+	self.UpdateConnection:Disconnect()
+	self.Highlight:Destroy()
+	table.clear(self)
+end
+
+function ChamObject:Update(Dt)
+	local CurrentTime = tick()
+	if CurrentTime - self.LastUpdateTime < UpdateRate then return end
+	self.LastUpdateTime = CurrentTime
+	local Highlight = self.Highlight
+	local Interface = self.Interface
+	local Character = Interface.GetCharacter(self.Player)
+	local Options = Interface.TeamSettings[Interface.IsFriendly(self.Player) and "Friendly" or "Enemy"]
+	local Enabled = Options.Enabled and Character and not (#Interface.Whitelist > 0 and not table.find(Interface.Whitelist, self.Player.UserId))
+	Highlight.Enabled = Enabled and Options.Chams
+	if Highlight.Enabled then
+		Highlight.Adornee = Character
+		Highlight.FillColor = ParseColor(self, Options.ChamsFillColor[1])
+		Highlight.FillTransparency = Options.ChamsFillColor[2]
+		Highlight.OutlineColor = ParseColor(self, Options.ChamsOutlineColor[1], true)
+		Highlight.OutlineTransparency = Options.ChamsOutlineColor[2]
+		Highlight.DepthMode = Options.ChamsVisibleOnly and "Occluded" or "AlwaysOnTop"
+	end
+end
+
+local EspInterface = {
+	_hasLoaded = false,
+	_objectCache = {},
+	Whitelist = {},
+	SharedSettings = {TextSize = 13, TextFont = 3, LimitDistance = false, MaxDistance = 9999, UseTeamColor = true},
+	TeamSettings = {
+		Enemy = {Enabled = true, HealthBar = true, HealthyColor = Color3.new(0, 1, 0), DyingColor = Color3.new(1, 0, 0), HealthBarOutline = true, HealthBarOutlineColor = {Color3.new(), 0.5}, Name = true, NameColor = {Color3.new(1, 1, 1), 1}, NameOutline = true, NameOutlineColor = Color3.new(), Chams = true, ChamsVisibleOnly = false, ChamsFillColor = {Color3.new(1, 1, 1), 0.8}, ChamsOutlineColor = {Color3.new(1, 1, 1), 0.6}},
+		Friendly = {Enabled = false}
+	}
+}
+
+function EspInterface.Load()
+	local function CreateObject(Player)
+		EspInterface._objectCache[Player] = {EspObject.new(Player, EspInterface), ChamObject.new(Player, EspInterface)}
+	end
+	local function RemoveObject(Player)
+		local Obj = EspInterface._objectCache[Player]
+		if Obj then
+			for I = 1, #Obj do Obj[I]:Destruct() end
+			EspInterface._objectCache[Player] = nil
+		end
+	end
+	local Plrs = Players:GetPlayers()
+	for I = 2, #Plrs do CreateObject(Plrs[I]) end
+	EspInterface.PlayerAdded = Players.PlayerAdded:Connect(CreateObject)
+	EspInterface.PlayerRemoving = Players.PlayerRemoving:Connect(RemoveObject)
+	EspInterface._hasLoaded = true
+end
+
+function EspInterface.Unload()
+	for Index, Obj in next, EspInterface._objectCache do
+		for I = 1, #Obj do Obj[I]:Destruct() end
+		EspInterface._objectCache[Index] = nil
+	end
+	EspInterface.PlayerAdded:Disconnect()
+	EspInterface.PlayerRemoving:Disconnect()
+	EspInterface._hasLoaded = false
+end
+
+function EspInterface.GetWeapon(Player) return "Unknown" end
+function EspInterface.IsFriendly(Player) return Player.Team and Player.Team == LocalPlayer.Team end
+function EspInterface.GetTeamColor(Player) return Player.Team and Player.Team.TeamColor and Player.Team.TeamColor.Color end
+function EspInterface.GetCharacter(Player) return Player.Character end
+function EspInterface.GetHealth(Player)
+	local Char = Player and EspInterface.GetCharacter(Player)
+	local Hum = Char and Char:FindFirstChildOfClass("Humanoid")
+	if Hum then return Hum.Health, Hum.MaxHealth end
+	return 100, 100
+end
+
+return EspInterface
